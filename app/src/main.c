@@ -1,57 +1,67 @@
+
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <stdbool.h>
 
-LOG_MODULE_REGISTER(demo, LOG_LEVEL_DBG);
+LOG_MODULE_REGISTER(homework, LOG_LEVEL_DBG);
 
-#define STACK_SIZE      1024
-#define PRIO            5
-#define INCREMENTS      100000000   /* each thread increments this many times */
+#define STACK_SIZE    1024
+#define SENSOR_MS     4    /* sensor fires every 100ms */
+#define POLL_MS       10     /* polling consumer checks every 10ms */
+#define EVENT_COUNT   5     /* total sensor events to produce */
 
-/* Shared state - intentionally unprotected */
-static volatile uint32_t counter;
 
-static struct k_sem done_sem;
-static struct k_mutex mutex;
+static int total_events;
+static int total_processed;
 
-void worker_fn(void *p1, void *p2, void *p3)
+static void sensor_handler(struct k_work *work)
 {
-    const char *name = k_thread_name_get(k_current_get());
-    for (int i = 0; i < INCREMENTS; i++) {
-        k_mutex_lock(&mutex, K_FOREVER);
-        counter = counter + 1;      // mutex around share resource -> counter
-        k_mutex_unlock(&mutex);
-    }
+    ARG_UNUSED(work);
+    total_processed++;
+    LOG_INF("[HANDLER] processed burst of events  tick=%u",
+            total_processed, k_uptime_get_32());
 
-    LOG_INF("[%s] finished", name);
-    k_sem_give(&done_sem);
 }
 
-K_THREAD_DEFINE(worker_a, STACK_SIZE, worker_fn, NULL, NULL, NULL,
-                PRIO, 0, 0);
-K_THREAD_DEFINE(worker_b, STACK_SIZE, worker_fn, NULL, NULL, NULL,
-                PRIO, 0, 0);
+K_WORK_DEFINE(sensor_work, sensor_handler);
+K_WORK_DELAYABLE_DEFINE(debounce_work, sensor_handler);
+
+
+static void sensor_sim_fn(void *p1, void *p2, void *p3)
+{
+    int ret;
+    for (int i = 0; i < EVENT_COUNT; i++) {
+        k_msleep(SENSOR_MS);
+
+        total_events++;
+        LOG_INF("[SENSOR] event %d  tick=%u", i, k_uptime_get_32());
+
+        ret = k_work_reschedule(&debounce_work, K_MSEC(30));
+        if (ret < 0) { 
+            LOG_ERR("submit failed: %d", ret); 
+        }
+        else
+        {
+            LOG_INF("Rescheduled handler event %d  tick=%u", i, k_uptime_get_32());
+        }
+    }
+
+    LOG_INF("[SENSOR] all events produced");
+}
+
+K_THREAD_DEFINE(sensor_thread,  STACK_SIZE, sensor_sim_fn, NULL, NULL, NULL, 5, 0, 0);
+
 
 int main(void)
 {
-    k_sem_init(&done_sem, 0, 2);
-    k_mutex_init(&mutex);
+    LOG_INF("=== L3 Homework: Polling to Workqueue ===");
+    LOG_INF("Expected wasted wakeups: ~%d per event",
+            (SENSOR_MS / POLL_MS) - 1);
+    LOG_INF("Run this, count wakeups, then convert to workqueue.");
 
-    LOG_INF("=== L2 Demo 1: Shared Counter Corruption ===");
-    LOG_INF("Expected final value: %d", INCREMENTS * 2);
-
-    /* Wait for both workers to complete */
-    k_sem_take(&done_sem, K_FOREVER);
-    k_sem_take(&done_sem, K_FOREVER);
-
-
-    LOG_INF("Actual final value: %u", counter);
-
-    if (counter == INCREMENTS * 2) {
-        LOG_INF("No race this run");
-    } else {
-        LOG_ERR("Race condition confirmed: lost %d updates",
-                (INCREMENTS * 2) - counter);
-    }
+    /* Wait long enough for all events to complete */
+    k_msleep((EVENT_COUNT + 2) * SENSOR_MS + 500);
 
     return 0;
 }
